@@ -1,3 +1,4 @@
 # Rank-heterogeneous preference models for school choice
-Accompanying the submission to KDD'23. 
-*In progress.*
+Source code for the paper by Amel Awadelkarim and Johan Ugander.
+
+For questions, please email Amel at ameloa@stanford.edu.
