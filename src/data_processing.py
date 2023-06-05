@@ -6,7 +6,7 @@ import torch as t
 
 HOMELANG_TO_PROGRAMS = {'CC-Chinese Cantonese': 'CB', 'SP-Spanish': 'SB'}
 
-def clean_dataframe(df, program_covariates, distances_df):
+def clean_dataframe(df, program_covariates, distances_df, top_k=None):
     data_list = []
     for i, row in df.iterrows():
         student = row['studentno']
@@ -17,6 +17,10 @@ def clean_dataframe(df, program_covariates, distances_df):
         homelang = row['homelang_desc']
         year = row['year']
         num_ranked = len(programs)
+        if top_k and num_ranked>top_k:
+            programs = programs[:top_k]
+            ranks=ranks[:top_k]
+            num_ranked=top_k
         if student in distances_df.index and all([program in program_covariates.index and program in distances_df.columns for program in programs]):
             data_list.append([student, programs, num_ranked, ranks, year, ctip, homelang])
     dataset = pd.DataFrame(data_list, columns = ['student', 'programs', 'num_ranked', 'ranks', 'year', 'ctip', 'homelang'])
@@ -33,19 +37,19 @@ def final_choice(entry):
     return [entry[-1]]
 
 def prep_for_pytorch(ballot, n):
-    voters, choices, choice_sets, chosen_sets = ballot['student_id'].values, ballot['choices'].values, ballot['choice_sets'].values, ballot['chosen_sets'].values
-    choice_sets_concat, choices_concat, chosen_sets_concat, whose_choice_concat = [], [], [], []
+    voters, choices, choice_sets, context_sets = ballot['student_id'].values, ballot['choices'].values, ballot['choice_sets'].values, ballot['context_sets'].values
+    choice_sets_concat, choices_concat, context_sets_concat, whose_choice_concat = [], [], [], []
     for idx, choice_set in enumerate(choice_sets):
-        assert(len(choice_set)==len(chosen_sets[idx])==len(choices[idx]))
+        assert(len(choice_set)==len(context_sets[idx])==len(choices[idx]))
         choice_sets_concat += choice_set
-        chosen_sets_concat += chosen_sets[idx]
+        context_sets_concat += context_sets[idx]
         choices_concat += choices[idx]
         whose_choice_concat += [voters[idx]]*len(choices[idx])
     
     choices = choices_concat
     choice_set_lengths = np.array([len(choice_set) for choice_set in choice_sets_concat])
-    chosen_set_lengths = np.array([len(chosen_set) for chosen_set in chosen_sets_concat])
-    x_extra = np.stack([np.array(whose_choice_concat), choice_set_lengths, chosen_set_lengths], axis=1)
+    context_sets_lengths = np.array([len(context_set) for context_set in context_sets_concat])
+    x_extra = np.stack([np.array(whose_choice_concat), choice_set_lengths, context_sets_lengths], axis=1)
     slots_chosen = np.array([choice_set.index(choices[idx]) for idx, choice_set in enumerate(choice_sets_concat)])
     
     kmax = choice_set_lengths.max() #should always be size of universe/greater than max chosen set length
@@ -53,10 +57,10 @@ def prep_for_pytorch(ballot, n):
     choice_sets = np.concatenate(choice_sets_concat)
     padded_choice_sets[np.arange(kmax)[None, :] < choice_set_lengths[:, None]] = choice_sets
 
-    padded_chosen_sets = np.full([len(chosen_sets_concat), kmax], fill_value=n, dtype=np.compat.long)
-    chosen_sets = np.concatenate(chosen_sets_concat)
-    padded_chosen_sets[np.arange(kmax)[None, :] < chosen_set_lengths[:, None]] = chosen_sets
-    x = np.stack([padded_choice_sets, padded_chosen_sets], axis=-1)
+    padded_context_sets = np.full([len(context_sets_concat), kmax], fill_value=n, dtype=np.compat.long)
+    context_sets = np.concatenate(context_sets_concat)
+    padded_context_sets[np.arange(kmax)[None, :] < context_sets_lengths[:, None]] = context_sets
+    x = np.stack([padded_choice_sets, padded_context_sets], axis=-1)
 
     return list(map(t.from_numpy, [x, x_extra, slots_chosen]))
 
@@ -78,7 +82,7 @@ def prep_valset(data, program_data, prog_codex):
             restricted_program_lookup[program_type].append(idx)
     
     cat=pd.Categorical(data['student'])
-    data['student_id'] = cat.codes
+    data = data.assign(student_id=cat.codes)
     codex_student = list(cat.categories)
     codex_ctip = np.zeros(len(codex_student))
 
@@ -96,7 +100,7 @@ def prep_valset(data, program_data, prog_codex):
             univ.remove(entry[idx])
             choice_sets.append(list(univ))
         return choice_sets
-
+    
     def chosen_set_func(entry):
         chosen_sets = [[]]
         for idx, item in enumerate(entry[1:]):
@@ -133,7 +137,7 @@ def prep_valset(data, program_data, prog_codex):
 
         ballot['choices'] = ballot['program_id'].apply(remove_repeats)
         ballot['choice_sets'] = ballot.apply(lambda x: choice_set_func(x['choices'], list(subset), language=x['homelang']), axis=1)
-        ballot['chosen_sets'] = ballot['program_id'].apply(lambda x: chosen_set_func(x))
+        ballot['context_sets'] = ballot['choices'].apply(lambda x: chosen_set_func(x))
         ballots.append(ballot)
     ballot = pd.concat(ballots, ignore_index=True)
     ds = prep_for_pytorch(ballot, n)
@@ -143,8 +147,14 @@ def prep_dataset(data, program_data):
     restricted_program_lookup = {'CB':[], 'SB':[]}
     cat=pd.Categorical(data.programs.explode())
     codex_programs = list(cat.categories)
+        
     data['program_id'] = [[codex_programs.index(program) for program in program_list] for program_list in data.programs]
     n=len(codex_programs)
+
+    schools_array=program_data.loc[codex_programs,'school_id'].values
+    program_type_array=program_data.loc[codex_programs,'program_type'].values
+    codex_schools, program_to_school=np.unique(schools_array,return_inverse=True)
+    codex_program_type, program_to_program_type=np.unique(program_type_array, return_inverse=True)
 
     all_restricted = []
     for idx, prog in enumerate(codex_programs):
@@ -172,7 +182,7 @@ def prep_dataset(data, program_data):
             univ.remove(entry[idx])
             choice_sets.append(list(univ))
         return choice_sets
-
+    
     def chosen_set_func(entry):
         chosen_sets = [[]]
         for idx, item in enumerate(entry[1:]):
@@ -208,9 +218,9 @@ def prep_dataset(data, program_data):
 
         ballot['choices'] = ballot['program_id'].apply(remove_repeats)
         ballot['choice_sets'] = ballot.apply(lambda x: choice_set_func(x['choices'], list(subset), language=x['homelang']), axis=1)
-        ballot['chosen_sets'] = ballot['choices'].apply(lambda x: chosen_set_func(x))
+        ballot['context_sets'] = ballot['choices'].apply(lambda x: chosen_set_func(x))
         ballots.append(ballot)
     ballot = pd.concat(ballots, ignore_index=True)
     ds = prep_for_pytorch(ballot, n)
 
-    return ds, codex_student, codex_programs, codex_ctip.astype(bool), ballot
+    return ds, codex_student, codex_programs, codex_schools, program_to_school, codex_program_type, program_to_program_type, codex_ctip.astype(bool), ballot
